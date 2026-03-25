@@ -1,0 +1,5 @@
+dronekit==2.9.2
+pymavlink>=2.4.39
+future>=1.0.0
+dronekit-sitl==3.3.0
+MAVProxy>=1.8.74
