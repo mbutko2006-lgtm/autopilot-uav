@@ -1,11 +1,11 @@
 param(
     [string]$TargetLat      = "50.443326",
     [string]$TargetLon      = "30.448078",
-    [double]$TargetAlt      = 100,
-    [double]$WindSpd        = 3,
+    [double]$TargetAlt      = 300,
+    [double]$WindSpd        = 5,
     [double]$WindDir        = 30,
-    [double]$WindTurb       = 2,
-    [double]$WindTurbFreq   = 0.2,
+    [double]$WindTurb       = 3,
+    [double]$WindTurbFreq   = 0.25,
     [string]$MissionPlannerExe = "",
     [switch]$SkipMissionPlannerLaunch,
     [switch]$SkipPipInstall

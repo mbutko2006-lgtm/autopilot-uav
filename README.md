@@ -9,12 +9,12 @@
 
 - Точка A (старт): `50.450739, 30.461242`
 - Точка B: `50.443326, 30.448078`
-- Висота: `100 м`
+- Висота: `300 м`
 - Вітер у SITL:
-  - `SIM_WIND_SPD = 3`
+  - `SIM_WIND_SPD = 5`
   - `SIM_WIND_DIR = 30`
-  - `SIM_WIND_TURB = 2`
-  - `SIM_WIND_TURB_FREQ = 0.2`
+  - `SIM_WIND_TURB = 3`
+  - `SIM_WIND_TURB_FREQ = 0.25`
 
 ## Підготовка (Windows)
 
@@ -65,7 +65,7 @@ Mission Planner підключати як `UDP` на порт `14550`.
 ## Прямий запуск скрипта
 
 ```powershell
-.\.venv\Scripts\python.exe autopilot_rc_override.py --connect tcp:127.0.0.1:5760 --target-lat 50.443326 --target-lon 30.448078 --target-alt 100
+.\.venv\Scripts\python.exe autopilot_rc_override.py --connect tcp:127.0.0.1:5760 --target-lat 50.443326 --target-lon 30.448078 --target-alt 300
 ```
 
 ## Запуск під ключ (SITL + місія однією командою)
@@ -84,9 +84,9 @@ Mission Planner підключати як `UDP` на порт `14550`.
 ## Логіка керування
 
 - `CH3` (throttle): PID для утримання / зниження висоти.
-- `CH4` (yaw): доведення курсу на точку B.
-- `CH2` (pitch): поступальний рух вперед до B.
-- `CH1` (roll): додаткова корекція курсу/позиції.
+- `CH4` (yaw): фіксовано в нейтралі (`1500`), активне yaw-керування вимкнене.
+- `CH2` (pitch): PID-корекція позиції до точки B у body-координатах.
+- `CH1` (roll): PID-корекція позиції до точки B у body-координатах.
 
 На етапі посадки виконується вертикальне зниження з XY-корекцією до координат B.
 

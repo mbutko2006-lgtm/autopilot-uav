@@ -54,7 +54,7 @@ class FlightConfig:
     connect_str: str = "127.0.0.1:14550"
     target_lat: float = 50.443326
     target_lon: float = 30.448078
-    target_alt_m: float = 100.0
+    target_alt_m: float = 300.0
 
     arrival_radius_m: float = 12.0
     slow_radius_m: float = 60.0
@@ -66,10 +66,10 @@ class FlightConfig:
     cruise_timeout_s: float = 1200.0
     landing_timeout_s: float = 600.0
 
-    wind_spd: float = 3.0
+    wind_spd: float = 5.0
     wind_dir: float = 30.0
-    wind_turb: float = 2.0
-    wind_turb_freq: float = 0.2
+    wind_turb: float = 3.0
+    wind_turb_freq: float = 0.25
 
     rc_slew_per_sec: float = 250.0
 
@@ -86,10 +86,28 @@ class FlightConfig:
         out_min=-145, out_max=145
     ))
 
-    yaw_pid: PID = field(default_factory=lambda: PID(
-        kp=2.2, ki=0.015, kd=0.40,
-        i_min=-45, i_max=45,
-        out_min=-170, out_max=170
+    cruise_x_pid: PID = field(default_factory=lambda: PID(
+        kp=2.8, ki=0.0, kd=0.55,
+        i_min=-25, i_max=25,
+        out_min=-220, out_max=220
+    ))
+
+    cruise_y_pid: PID = field(default_factory=lambda: PID(
+        kp=2.8, ki=0.0, kd=0.55,
+        i_min=-25, i_max=25,
+        out_min=-220, out_max=220
+    ))
+
+    align_x_pid: PID = field(default_factory=lambda: PID(
+        kp=3.4, ki=0.0, kd=0.6,
+        i_min=-18, i_max=18,
+        out_min=-160, out_max=160
+    ))
+
+    align_y_pid: PID = field(default_factory=lambda: PID(
+        kp=3.4, ki=0.0, kd=0.6,
+        i_min=-18, i_max=18,
+        out_min=-160, out_max=160
     ))
 
     # Сильніша фінальна XY-корекція
@@ -327,7 +345,8 @@ def cruise_to_target(vehicle, rc: RCController, cfg: FlightConfig):
     print("Cruise phase in STABILIZE with RC override")
 
     cfg.alt_cruise_pid.reset()
-    cfg.yaw_pid.reset()
+    cfg.cruise_x_pid.reset()
+    cfg.cruise_y_pid.reset()
     t0 = time.time()
 
     while True:
@@ -346,7 +365,11 @@ def cruise_to_target(vehicle, rc: RCController, cfg: FlightConfig):
             break
 
         desired_bearing = bearing_deg(lat, lon, cfg.target_lat, cfg.target_lon)
-        heading_err = wrap_angle_deg(desired_bearing - hdg)
+        n_err, e_err = relative_ne_m(lat, lon, cfg.target_lat, cfg.target_lon)
+
+        yaw_rad = math.radians(hdg)
+        forward_err = n_err * math.cos(yaw_rad) + e_err * math.sin(yaw_rad)
+        right_err = -n_err * math.sin(yaw_rad) + e_err * math.cos(yaw_rad)
 
         alt_err = cfg.target_alt_m - alt
         throttle = clamp(
@@ -355,21 +378,19 @@ def cruise_to_target(vehicle, rc: RCController, cfg: FlightConfig):
             1590,
         )
 
-        yaw_corr = cfg.yaw_pid.update(heading_err, cfg.loop_dt_s)
-        yaw = clamp(1500 + yaw_corr, 1320, 1680)
-
-        align_scale = 1.0 - clamp(abs(heading_err) / 70.0, 0.0, 1.0)
         dist_scale = 1.0
         if dist < cfg.slow_radius_m:
-            dist_scale = clamp(dist / cfg.slow_radius_m, 0.18, 1.0)
+            dist_scale = clamp(dist / cfg.slow_radius_m, 0.20, 1.0)
 
         if dist < cfg.final_radius_m:
-            align_scale *= 0.75
+            dist_scale *= 0.8
 
-        pitch_cmd = 260.0 * align_scale * dist_scale
-        pitch = clamp(1500 - pitch_cmd, 1260, 1500)
+        pitch_corr = cfg.cruise_x_pid.update(forward_err, cfg.loop_dt_s) * dist_scale
+        roll_corr = cfg.cruise_y_pid.update(right_err, cfg.loop_dt_s) * dist_scale
 
-        roll = clamp(1500 + 0.7 * yaw_corr, 1420, 1580)
+        pitch = clamp(1500 - pitch_corr, 1260, 1540)
+        roll = clamp(1500 + roll_corr, 1380, 1620)
+        yaw = 1500
 
         rc.send(
             roll=roll,
@@ -381,7 +402,7 @@ def cruise_to_target(vehicle, rc: RCController, cfg: FlightConfig):
 
         print(
             f"Cruise | dist={dist:6.1f}m alt={alt:6.1f}m hdg={hdg:6.1f} "
-            f"bear={desired_bearing:6.1f} herr={heading_err:6.1f} "
+            f"bear={desired_bearing:6.1f} body=({forward_err:6.1f},{right_err:6.1f}) "
             f"rc(r,p,t,y)=({int(roll)},{int(pitch)},{int(throttle)},{int(yaw)})"
         )
         time.sleep(cfg.loop_dt_s)
@@ -404,7 +425,8 @@ def hover_align_at_target(vehicle, rc: RCController, cfg: FlightConfig):
     print("Hover-align phase: gentle approach to target before descent")
 
     cfg.alt_cruise_pid.reset()
-    cfg.yaw_pid.reset()
+    cfg.align_x_pid.reset()
+    cfg.align_y_pid.reset()
 
     t0 = time.time()
     align_timeout_s = 90.0
@@ -434,18 +456,19 @@ def hover_align_at_target(vehicle, rc: RCController, cfg: FlightConfig):
 
         hdg = float(vehicle.heading or 0.0)
         desired_bearing = bearing_deg(lat, lon, cfg.target_lat, cfg.target_lon)
-        heading_err = wrap_angle_deg(desired_bearing - hdg)
+        n_err, e_err = relative_ne_m(lat, lon, cfg.target_lat, cfg.target_lon)
 
-        # Yaw correction
-        yaw_corr = cfg.yaw_pid.update(heading_err, cfg.loop_dt_s)
-        yaw = clamp(1500 + yaw_corr, 1380, 1620)
+        yaw_rad = math.radians(hdg)
+        forward_err = n_err * math.cos(yaw_rad) + e_err * math.sin(yaw_rad)
+        right_err = -n_err * math.sin(yaw_rad) + e_err * math.cos(yaw_rad)
 
-        # Heading alignment scale: slow to near-zero if facing wrong way
-        align_scale = 1.0 - clamp(abs(heading_err) / 60.0, 0.0, 1.0)
+        near_scale = clamp(dist / 6.5, 0.22, 1.0)
+        pitch_corr = cfg.align_x_pid.update(forward_err, cfg.loop_dt_s) * near_scale
+        roll_corr = cfg.align_y_pid.update(right_err, cfg.loop_dt_s) * near_scale
 
-        # Slightly stronger near-target approach to reduce landing entry error
-        pitch_cmd = 82.0 * align_scale * clamp(dist / 6.5, 0.22, 1.0)
-        pitch = clamp(1500 - pitch_cmd, 1440, 1500)
+        pitch = clamp(1500 - pitch_corr, 1420, 1540)
+        roll = clamp(1500 + roll_corr, 1420, 1580)
+        yaw = 1500
 
         # Altitude hold
         alt_err = cfg.target_alt_m - alt
@@ -454,12 +477,10 @@ def hover_align_at_target(vehicle, rc: RCController, cfg: FlightConfig):
             1280, 1580,
         )
 
-        roll = clamp(1500 + 0.5 * yaw_corr, 1460, 1540)
-
         rc.send(roll=roll, pitch=pitch, throttle=throttle, yaw=yaw, dt=cfg.loop_dt_s)
         print(
             f"Align  | dist={dist:5.2f}m alt={alt:5.2f}m hdg={hdg:.1f} "
-            f"bear={desired_bearing:.1f} herr={heading_err:.1f} "
+            f"bear={desired_bearing:.1f} body=({forward_err:5.2f},{right_err:5.2f}) "
             f"rc(r,p,t,y)=({int(roll)},{int(pitch)},{int(throttle)},{int(yaw)})"
         )
         time.sleep(cfg.loop_dt_s)
@@ -597,13 +618,13 @@ def parse_args():
     parser.add_argument("--connect", default="udp:127.0.0.1:14551", help="Vehicle connection string")
     parser.add_argument("--target-lat", type=float, default=50.443326)
     parser.add_argument("--target-lon", type=float, default=30.448078)
-    parser.add_argument("--target-alt", type=float, default=100.0)
+    parser.add_argument("--target-alt", type=float, default=300.0)
     parser.add_argument("--arrival-radius", type=float, default=12.0)
     parser.add_argument("--slow-radius", type=float, default=60.0)
-    parser.add_argument("--wind-spd", type=float, default=3.0)
+    parser.add_argument("--wind-spd", type=float, default=5.0)
     parser.add_argument("--wind-dir", type=float, default=30.0)
-    parser.add_argument("--wind-turb", type=float, default=2.0)
-    parser.add_argument("--wind-turb-freq", type=float, default=0.2)
+    parser.add_argument("--wind-turb", type=float, default=3.0)
+    parser.add_argument("--wind-turb-freq", type=float, default=0.25)
     return parser.parse_args()
 
 
