@@ -125,13 +125,13 @@ class FlightConfig:
 
     # Сильніша фінальна XY-корекція
     land_x_pid: PID = field(default_factory=lambda: PID(
-        kp=6.2, ki=0.18, kd=1.5,
+        kp=5.5, ki=0.13, kd=1.2,
         i_min=-12, i_max=12,
         out_min=-170, out_max=170
     ))
 
     land_y_pid: PID = field(default_factory=lambda: PID(
-        kp=6.2, ki=0.18, kd=1.5,
+        kp=5.5, ki=0.13, kd=1.2,
         i_min=-12, i_max=12,
         out_min=-170, out_max=170
     ))
@@ -562,9 +562,9 @@ def landing_at_target(vehicle, rc: RCController, cfg: FlightConfig):
         elif alt > 12.0:
             xy_gain_scale = 0.8
         elif alt > 2.5:
-            xy_gain_scale = 1.35
+            xy_gain_scale = 1.75
         else:
-            xy_gain_scale = 2.10
+            xy_gain_scale = 1.6
 
         yaw_rad = math.radians(float(vehicle.heading or heading_ref))
         pitch_corr = cfg.land_x_pid.update(forward_err, cfg.loop_dt_s) * xy_gain_scale
@@ -579,7 +579,7 @@ def landing_at_target(vehicle, rc: RCController, cfg: FlightConfig):
         elif alt > 10.0:
             descent_rate = 1.7
         elif alt > 4.0:
-            descent_rate = 1.0
+            descent_rate = 0.6
         elif alt > 2.2:
             descent_rate = 0.30
         else:
