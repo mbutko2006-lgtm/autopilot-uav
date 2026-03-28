@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-import argparse
 import collections
 import collections.abc
+
+# Patch for Python 3.10+ compatibility with dronekit
+if not hasattr(collections, "MutableMapping"):
+    collections.MutableMapping = collections.abc.MutableMapping
+
+import argparse
 import math
 import time
 from dataclasses import dataclass, field
-
-if not hasattr(collections, "MutableMapping"):
-    collections.MutableMapping = collections.abc.MutableMapping
 
 from dronekit import VehicleMode, connect
 from pymavlink import mavutil
@@ -25,11 +27,17 @@ class PID:
     integral: float = 0.0
     prev_error: float = 0.0
     initialized: bool = False
+    last_p: float = 0.0
+    last_i: float = 0.0
+    last_d: float = 0.0
 
     def reset(self):
         self.integral = 0.0
         self.prev_error = 0.0
         self.initialized = False
+        self.last_p = 0.0
+        self.last_i = 0.0
+        self.last_d = 0.0
 
     def update(self, error: float, dt: float) -> float:
         if dt <= 0.0:
@@ -45,7 +53,10 @@ class PID:
         derivative = (error - self.prev_error) / dt
         self.prev_error = error
 
-        out = self.kp * error + self.ki * self.integral + self.kd * derivative
+        self.last_p = self.kp * error
+        self.last_i = self.ki * self.integral
+        self.last_d = self.kd * derivative
+        out = self.last_p + self.last_i + self.last_d
         return clamp(out, self.out_min, self.out_max)
 
 
@@ -56,7 +67,7 @@ class FlightConfig:
     target_lon: float = 30.448078
     target_alt_m: float = 300.0
 
-    arrival_radius_m: float = 12.0
+    arrival_radius_m: float = 25.0
     slow_radius_m: float = 60.0
     final_radius_m: float = 22.0
     touchdown_radius_m: float = 5.0
@@ -72,6 +83,8 @@ class FlightConfig:
     wind_turb_freq: float = 0.25
 
     rc_slew_per_sec: float = 250.0
+    alt_safety_margin_m: float = 30.0
+    alt_safety_throttle: float = 1240.0
 
     alt_takeoff_pid: PID = field(default_factory=lambda: PID(
         kp=3.8, ki=0.03, kd=1.5,
@@ -87,27 +100,27 @@ class FlightConfig:
     ))
 
     cruise_x_pid: PID = field(default_factory=lambda: PID(
-        kp=2.8, ki=0.0, kd=0.55,
+        kp=3.8, ki=0.0, kd=0.45,
         i_min=-25, i_max=25,
-        out_min=-220, out_max=220
+        out_min=-280, out_max=280
     ))
 
     cruise_y_pid: PID = field(default_factory=lambda: PID(
-        kp=2.8, ki=0.0, kd=0.55,
+        kp=3.4, ki=0.0, kd=0.45,
         i_min=-25, i_max=25,
-        out_min=-220, out_max=220
+        out_min=-240, out_max=240
     ))
 
     align_x_pid: PID = field(default_factory=lambda: PID(
-        kp=3.4, ki=0.0, kd=0.6,
+        kp=4.2, ki=0.0, kd=0.5,
         i_min=-18, i_max=18,
-        out_min=-160, out_max=160
+        out_min=-190, out_max=190
     ))
 
     align_y_pid: PID = field(default_factory=lambda: PID(
-        kp=3.4, ki=0.0, kd=0.6,
+        kp=4.2, ki=0.0, kd=0.5,
         i_min=-18, i_max=18,
-        out_min=-160, out_max=160
+        out_min=-190, out_max=190
     ))
 
     # Сильніша фінальна XY-корекція
@@ -126,6 +139,12 @@ class FlightConfig:
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def apply_altitude_safety_cap(throttle: float, alt: float, cfg: FlightConfig) -> float:
+    if alt > cfg.target_alt_m + cfg.alt_safety_margin_m:
+        return min(throttle, cfg.alt_safety_throttle)
+    return throttle
 
 
 def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -319,6 +338,7 @@ def manual_takeoff(vehicle, rc: RCController, cfg: FlightConfig):
         else:
             base = 1475  # decelerate near target
         throttle = clamp(base + throttle_corr, 1475, 1680)
+        throttle = apply_altitude_safety_cap(throttle, alt, cfg)
 
         rc.send(roll=1500, pitch=1500, throttle=throttle, yaw=1500, dt=cfg.loop_dt_s)
 
@@ -334,6 +354,7 @@ def manual_takeoff(vehicle, rc: RCController, cfg: FlightConfig):
         alt = vehicle.location.global_relative_frame.alt or 0.0
         err = cfg.target_alt_m - alt
         throttle = clamp(1390 + cfg.alt_cruise_pid.update(err, cfg.loop_dt_s), 1250, 1580)
+        throttle = apply_altitude_safety_cap(throttle, alt, cfg)
         rc.send(roll=1500, pitch=1500, throttle=throttle, yaw=1500, dt=cfg.loop_dt_s)
         print(f"Settle | alt={alt:6.1f}m err={err:5.1f} thr={int(throttle)}")
         if abs(err) <= 2.0:
@@ -377,10 +398,11 @@ def cruise_to_target(vehicle, rc: RCController, cfg: FlightConfig):
             1280,
             1590,
         )
+        throttle = apply_altitude_safety_cap(throttle, alt, cfg)
 
         dist_scale = 1.0
         if dist < cfg.slow_radius_m:
-            dist_scale = clamp(dist / cfg.slow_radius_m, 0.20, 1.0)
+            dist_scale = clamp(dist / cfg.slow_radius_m, 0.35, 1.0)
 
         if dist < cfg.final_radius_m:
             dist_scale *= 0.8
@@ -388,8 +410,8 @@ def cruise_to_target(vehicle, rc: RCController, cfg: FlightConfig):
         pitch_corr = cfg.cruise_x_pid.update(forward_err, cfg.loop_dt_s) * dist_scale
         roll_corr = cfg.cruise_y_pid.update(right_err, cfg.loop_dt_s) * dist_scale
 
-        pitch = clamp(1500 - pitch_corr, 1260, 1540)
-        roll = clamp(1500 + roll_corr, 1380, 1620)
+        pitch = clamp(1500 - pitch_corr, 1340, 1660)
+        roll = clamp(1500 + roll_corr, 1360, 1640)
         yaw = 1500
 
         rc.send(
@@ -416,6 +438,7 @@ def cruise_to_target(vehicle, rc: RCController, cfg: FlightConfig):
             1280,
             1560,
         )
+        throttle = apply_altitude_safety_cap(throttle, alt, cfg)
         rc.send(roll=1500, pitch=1500, throttle=throttle, yaw=1500, dt=cfg.loop_dt_s)
         time.sleep(cfg.loop_dt_s)
 
@@ -430,8 +453,8 @@ def hover_align_at_target(vehicle, rc: RCController, cfg: FlightConfig):
 
     t0 = time.time()
     align_timeout_s = 90.0
-    align_target_dist_m = 3.2  # tighter handoff into landing phase
-    align_hold_s = 2.8
+    align_target_dist_m = 4.0
+    align_hold_s = 2.0
     align_in_radius_since = None
 
     while True:
@@ -462,12 +485,12 @@ def hover_align_at_target(vehicle, rc: RCController, cfg: FlightConfig):
         forward_err = n_err * math.cos(yaw_rad) + e_err * math.sin(yaw_rad)
         right_err = -n_err * math.sin(yaw_rad) + e_err * math.cos(yaw_rad)
 
-        near_scale = clamp(dist / 6.5, 0.22, 1.0)
+        near_scale = clamp(dist / 8.0, 0.35, 1.0)
         pitch_corr = cfg.align_x_pid.update(forward_err, cfg.loop_dt_s) * near_scale
         roll_corr = cfg.align_y_pid.update(right_err, cfg.loop_dt_s) * near_scale
 
-        pitch = clamp(1500 - pitch_corr, 1420, 1540)
-        roll = clamp(1500 + roll_corr, 1420, 1580)
+        pitch = clamp(1500 - pitch_corr, 1380, 1620)
+        roll = clamp(1500 + roll_corr, 1380, 1620)
         yaw = 1500
 
         # Altitude hold
@@ -476,6 +499,7 @@ def hover_align_at_target(vehicle, rc: RCController, cfg: FlightConfig):
             1390 + cfg.alt_cruise_pid.update(alt_err, cfg.loop_dt_s),
             1280, 1580,
         )
+        throttle = apply_altitude_safety_cap(throttle, alt, cfg)
 
         rc.send(roll=roll, pitch=pitch, throttle=throttle, yaw=yaw, dt=cfg.loop_dt_s)
         print(
@@ -494,6 +518,7 @@ def hover_align_at_target(vehicle, rc: RCController, cfg: FlightConfig):
             1390 + cfg.alt_cruise_pid.update(alt_err, cfg.loop_dt_s),
             1280, 1560,
         )
+        throttle = apply_altitude_safety_cap(throttle, alt, cfg)
         rc.send(roll=1500, pitch=1500, throttle=throttle, yaw=1500, dt=cfg.loop_dt_s)
         time.sleep(cfg.loop_dt_s)
 
@@ -591,9 +616,12 @@ def landing_at_target(vehicle, rc: RCController, cfg: FlightConfig):
             dt=cfg.loop_dt_s,
         )
 
+        thr_p = 15.0 * alt_err if alt > 20.0 else (17.0 * alt_err if alt > 8.0 else 28.0 * alt_err)
         print(
-            f"Land   | dist={dist:5.2f}m alt={alt:5.2f}m ne=({n_err:6.2f},{e_err:6.2f}) "
-            f"body=({forward_err:6.2f},{right_err:6.2f}) "
+            f"Land   | dist={dist:5.2f}m alt={alt:5.2f}m "
+            f"pitch_PID=({cfg.land_x_pid.last_p:6.1f},{cfg.land_x_pid.last_i:5.1f},{cfg.land_x_pid.last_d:5.1f}) "
+            f"roll_PID=({cfg.land_y_pid.last_p:6.1f},{cfg.land_y_pid.last_i:5.1f},{cfg.land_y_pid.last_d:5.1f}) "
+            f"thr_P={thr_p:6.1f} alt_err={alt_err:5.2f} "
             f"rc(r,p,t)=({int(roll)},{int(pitch)},{int(throttle)})"
         )
         time.sleep(cfg.loop_dt_s)
@@ -619,7 +647,7 @@ def parse_args():
     parser.add_argument("--target-lat", type=float, default=50.443326)
     parser.add_argument("--target-lon", type=float, default=30.448078)
     parser.add_argument("--target-alt", type=float, default=300.0)
-    parser.add_argument("--arrival-radius", type=float, default=12.0)
+    parser.add_argument("--arrival-radius", type=float, default=25.0)
     parser.add_argument("--slow-radius", type=float, default=60.0)
     parser.add_argument("--wind-spd", type=float, default=5.0)
     parser.add_argument("--wind-dir", type=float, default=30.0)
